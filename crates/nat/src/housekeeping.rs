@@ -40,8 +40,10 @@ use crate::types::{Now, ReachabilityState, ReservationInfo};
 ///
 /// The relay's `expire` is an absolute timestamp, so a relay clock ahead of
 /// ours by `S` inflates the lifetime we compute by `S` without our being able
-/// to tell. Renewal still lands before the actual expiry only while `S` is
-/// less than half the reported lifetime (at exactly half it lands at expiry).
+/// to tell. When the reported lifetime is not capped by
+/// `reservation_default_ttl_secs`, renewal still lands before the actual
+/// expiry only while `S` is less than half of it (at exactly half it lands at
+/// expiry); a binding cap only shortens the delay.
 /// A fixed margin before expiry would tolerate only skew below the margin.
 fn renewal_delay_ms(lifetime_secs: u64) -> u64 {
     lifetime_secs.max(1).saturating_mul(1_000) / 2
