@@ -76,10 +76,13 @@ pub struct NatConfig {
     pub probe_deadline_ms: u64,
     /// Assumed reservation lifetime when the relay returns no `expire` or
     /// the host has no wall clock, and the cap on any lifetime the relay
-    /// reports, so a far-future `expire` cannot push renewal past the
-    /// lifetime the relay actually enforces.
+    /// reports.
     ///
-    /// Reservations renew at half their lifetime. `0` and `1` are a
+    /// Reservations renew at half their lifetime, so this bounds the renewal
+    /// delay at half its value: a far-future `expire` cannot postpone renewal
+    /// indefinitely. It does not guarantee renewal before the relay's actual
+    /// expiry; a relay that enforces 600s but reports far more still renews
+    /// after 1800s with the default of 3600. `0` and `1` are a
     /// misconfiguration: every reservation then renews every 500ms.
     pub reservation_default_ttl_secs: u64,
     /// Backoff before retrying (or rotating relays) after a refused or

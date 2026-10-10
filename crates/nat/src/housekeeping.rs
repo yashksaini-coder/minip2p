@@ -32,14 +32,17 @@ use crate::types::{Now, ReachabilityState, ReservationInfo};
 /// Milliseconds to wait before renewing a reservation with `lifetime_secs`
 /// left: half of it, DHCP-T1 style.
 ///
-/// Half the lifetime renews strictly before expiry however short the lifetime
-/// is (a 1s reservation renews after 500ms), and since each renewal is granted
-/// a similar lifetime, renewals stay half a lifetime apart rather than piling
-/// up as expiry nears. It also tolerates the relay's clock running up to half
-/// the reported lifetime ahead of ours: the relay's `expire` is an absolute
-/// timestamp, so that skew inflates the remaining lifetime we compute and
-/// cannot be detected. A fixed margin before expiry tolerates only the margin.
-/// A zero lifetime counts as one second, so renewal never busy-loops.
+/// With an accurate lifetime this renews before expiry however short it is (a
+/// 1s reservation renews after 500ms), and since each renewal is granted a
+/// similar lifetime, renewals stay half a lifetime apart rather than piling up
+/// as expiry nears. The delay is never under 500ms: a zero lifetime counts as
+/// one second, so renewal never busy-loops.
+///
+/// The relay's `expire` is an absolute timestamp, so a relay clock ahead of
+/// ours by `S` inflates the lifetime we compute by `S` without our being able
+/// to tell. Renewal still lands before the actual expiry only while `S` is
+/// less than half the reported lifetime (at exactly half it lands at expiry).
+/// A fixed margin before expiry would tolerate only skew below the margin.
 fn renewal_delay_ms(lifetime_secs: u64) -> u64 {
     lifetime_secs.max(1).saturating_mul(1_000) / 2
 }
@@ -968,11 +971,12 @@ impl ReservationManager {
         // approximate by design.
         //
         // The relay owns `expire` and is not trusted to report it sanely.
-        // Clamping to the default TTL keeps a value far in the future from
-        // pushing renewal past the lifetime the relay actually enforces, which
-        // would drop the reservation with the connection still up -- so no
-        // `RelayReservationLost` -- while we keep advertising a ticket that
-        // dialers get NO_RESERVATION on. An expiry at or before now (a stale
+        // Clamping to the default TTL bounds the renewal delay, so a value far
+        // in the future cannot postpone renewal indefinitely. Past that, a
+        // relay enforcing a shorter lifetime than it reports can still expire
+        // first: it then drops the reservation with the connection still up
+        // -- so no `RelayReservationLost` -- while we keep advertising a
+        // ticket that dialers get NO_RESERVATION on. An expiry at or before now (a stale
         // value, or clock skew) is treated as no expiry at all.
         let lifetime_secs = match (expire_unix_secs, now.unix_secs) {
             (Some(expire), Some(unix_now)) if expire > unix_now => {
