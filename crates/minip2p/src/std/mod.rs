@@ -715,7 +715,12 @@ impl Endpoint {
     ///
     /// Unlike [`Endpoint::reset_stream`], this also discards matching events
     /// already buffered by the endpoint and suppresses later data, EOF, and
-    /// close events for the stream. Repeated calls are idempotent.
+    /// close events for the stream. Abandoning a live stream again is a
+    /// no-op. A stream the peer has already closed has nothing left to reset:
+    /// it is abandoned (and its undelivered data acknowledged) only while its
+    /// [`EndpointEvent::StreamClosed`] is undelivered and still in the swarm,
+    /// and fails with [`SwarmError::StreamNotFound`] after that, including on
+    /// a second call.
     pub fn abandon_stream(
         &mut self,
         peer_id: &PeerId,
@@ -723,6 +728,11 @@ impl Endpoint {
         stream_id: StreamId,
     ) -> Result<(), Error> {
         self.swarm.abandon_stream(peer_id, conn_id, stream_id)?;
+        // The data dropped below needs no acknowledgement of its own: the
+        // swarm's reset settles a live stream, and a closed stream's data
+        // cannot sit here while its close is still in the swarm, because
+        // `wait` hands out a step's stream event in the same call and `poll`
+        // drains both queues.
         self.pending_events
             .retain(|event| !event.matches_stream(peer_id, conn_id, stream_id));
         self.acks.forget(conn_id, stream_id);
