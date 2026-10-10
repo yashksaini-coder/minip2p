@@ -4576,8 +4576,7 @@ mod tests {
                 break (conn_id, stream_id);
             }
         };
-        // The reader closes first, so the writer's data and FIN close the
-        // stream in one arrival.
+        // The reader closes first, so the writer's FIN closes the stream.
         reader
             .close_stream_write(&writer_peer, conn, stream)
             .expect("reader close");
@@ -4605,20 +4604,22 @@ mod tests {
         writer.next_event(tick).expect("flush writer");
 
         // Stage what a `wait` cut short leaves behind: the step's data in the
-        // Endpoint queue, its close still in the swarm's.
+        // Endpoint queue, its close still in the swarm's. Data and FIN may
+        // arrive separately, so pull until the close and then queue it back.
         loop {
-            assert!(std::time::Instant::now() < give_up, "data never arrived");
-            if let Some(event) = reader.swarm.poll_next(tick).expect("poll reader")
-                && matches!(&event, SwarmEvent::StreamData { stream_id, .. } if *stream_id == stream)
-            {
-                reader.pending_events.push_back(event.into());
-                break;
+            assert!(std::time::Instant::now() < give_up, "stream never closed");
+            writer.next_event(tick).expect("drive writer");
+            match reader.swarm.poll_next(tick).expect("poll reader") {
+                Some(event @ SwarmEvent::StreamData { stream_id, .. }) if stream_id == stream => {
+                    reader.pending_events.push_back(event.into());
+                }
+                Some(event @ SwarmEvent::StreamClosed { stream_id, .. }) if stream_id == stream => {
+                    reader.swarm.preload_poll_events([event]);
+                    break;
+                }
+                _ => {}
             }
         }
-        assert!(reader.swarm.core().buffered_events().any(|event| matches!(
-            event,
-            SwarmEvent::StreamClosed { stream_id, .. } if *stream_id == stream
-        )));
 
         reader
             .abandon_stream(&writer_peer, conn, stream)
