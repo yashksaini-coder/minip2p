@@ -74,17 +74,13 @@ pub struct NatConfig {
     pub probe_interval_unsettled_ms: u64,
     /// Deadline for a single AutoNAT probe exchange.
     pub probe_deadline_ms: u64,
-    /// Renew a reservation this many seconds before its `expire` timestamp.
-    ///
-    /// The relay-reported lifetime is clamped to
-    /// [`Self::reservation_default_ttl_secs`] first, and an `expire` already
-    /// past counts as none at all, so a relay cannot push renewal beyond the
-    /// lifetime it enforces or pull it into a once-a-second loop. A lifetime
-    /// too short to honour this margin renews at half of it instead, which
-    /// still lands before expiry.
-    pub reservation_renewal_margin_secs: u64,
     /// Assumed reservation lifetime when the relay returns no `expire` or
-    /// the host has no wall clock.
+    /// the host has no wall clock, and the cap on any lifetime the relay
+    /// reports, so a far-future `expire` cannot push renewal past the
+    /// lifetime the relay actually enforces.
+    ///
+    /// Reservations renew at half their lifetime. `0` and `1` are a
+    /// misconfiguration: every reservation then renews every 500ms.
     pub reservation_default_ttl_secs: u64,
     /// Backoff before retrying (or rotating relays) after a refused or
     /// failed reservation.
@@ -117,7 +113,6 @@ impl Default for NatConfig {
             probe_interval_settled_ms: 90_000,
             probe_interval_unsettled_ms: 5_000,
             probe_deadline_ms: 20_000,
-            reservation_renewal_margin_secs: 120,
             reservation_default_ttl_secs: 3_600,
             reservation_retry_backoff_ms: 500,
             reservation_keep_alive_interval_ms: 15_000,

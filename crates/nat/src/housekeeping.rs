@@ -4,7 +4,7 @@
 //!   over a sliding window of M verdicts. `AutoNatClient` is single-shot;
 //!   the aggregation (and the never-flap-on-one-probe guarantee) lives here.
 //! - [`ReservationManager`] — holds a relay reservation per the configured
-//!   [`ReservationPolicy`], renewing ahead of the relay-reported `expire`
+//!   [`ReservationPolicy`], renewing at half the relay-reported lifetime
 //!   and rotating relays (with backoff) on refusal or loss.
 //!
 //! Both reach their peer through the shared acquisition
@@ -29,20 +29,19 @@ use crate::events::NatEvent;
 use crate::swarm::NatSwarm;
 use crate::types::{Now, ReachabilityState, ReservationInfo};
 
-/// Seconds to wait before renewing a reservation with `lifetime` seconds left,
-/// renewing `margin` ahead of expiry.
+/// Milliseconds to wait before renewing a reservation with `lifetime_secs`
+/// left: half of it, DHCP-T1 style.
 ///
-/// A lifetime with no room for the margin renews at half of it instead: that
-/// still lands before expiry however short the lifetime is, while a fixed
-/// floor would schedule renewal after a short reservation was already gone,
-/// and renewing "right away" would be a RESERVE per second for as long as the
-/// reservation is held.
-fn renewal_delay_secs(lifetime: u64, margin: u64) -> u64 {
-    if lifetime > margin {
-        lifetime - margin
-    } else {
-        (lifetime / 2).max(1)
-    }
+/// Half the lifetime renews strictly before expiry however short the lifetime
+/// is (a 1s reservation renews after 500ms), and since each renewal is granted
+/// a similar lifetime, renewals stay half a lifetime apart rather than piling
+/// up as expiry nears. It also tolerates the relay's clock running up to half
+/// the reported lifetime ahead of ours: the relay's `expire` is an absolute
+/// timestamp, so that skew inflates the remaining lifetime we compute and
+/// cannot be detected. A fixed margin before expiry tolerates only the margin.
+/// A zero lifetime counts as one second, so renewal never busy-loops.
+fn renewal_delay_ms(lifetime_secs: u64) -> u64 {
+    lifetime_secs.max(1).saturating_mul(1_000) / 2
 }
 
 /// Progress of one outbound single-stream exchange (probe or reservation).
@@ -963,34 +962,30 @@ impl ReservationManager {
         finish_stream(&relay_peer, conn, stream, swarm, shared, now);
         self.held = None;
 
-        let margin = shared.config.reservation_renewal_margin_secs;
         let default_ttl = shared.config.reservation_default_ttl_secs;
-        // Renew `margin` seconds before the reported expiry when both the
-        // expiry and a wall clock exist; otherwise assume the default TTL.
-        // Clockless renewal is approximate by design.
+        // Renew at half the reported lifetime when both the expiry and a wall
+        // clock exist; otherwise at half the default TTL. Clockless renewal is
+        // approximate by design.
         //
         // The relay owns `expire` and is not trusted to report it sanely.
         // Clamping to the default TTL keeps a value far in the future from
         // pushing renewal past the lifetime the relay actually enforces, which
         // would drop the reservation with the connection still up -- so no
         // `RelayReservationLost` -- while we keep advertising a ticket that
-        // dialers get NO_RESERVATION on. An expiry already past (a stale value,
-        // or clock skew wider than the margin) is treated as no expiry at all
-        // rather than renewed against once a second.
-        let renew_in_secs = match (expire_unix_secs, now.unix_secs) {
+        // dialers get NO_RESERVATION on. An expiry at or before now (a stale
+        // value, or clock skew) is treated as no expiry at all.
+        let lifetime_secs = match (expire_unix_secs, now.unix_secs) {
             (Some(expire), Some(unix_now)) if expire > unix_now => {
-                renewal_delay_secs((expire - unix_now).min(default_ttl), margin)
+                (expire - unix_now).min(default_ttl)
             }
-            _ => renewal_delay_secs(default_ttl, margin),
+            _ => default_ttl,
         };
         let info = ReservationInfo {
             relay: relay_peer.clone(),
             expires_unix_secs: expire_unix_secs,
             // The relay controls `expire`, so this conversion must not let a
             // large value wrap the monotonic renewal deadline.
-            renew_at_mono_ms: now
-                .mono_ms
-                .saturating_add(renew_in_secs.saturating_mul(1_000)),
+            renew_at_mono_ms: now.mono_ms.saturating_add(renewal_delay_ms(lifetime_secs)),
         };
         shared.push_event(NatEvent::RelayReserved {
             relay: relay_peer,
